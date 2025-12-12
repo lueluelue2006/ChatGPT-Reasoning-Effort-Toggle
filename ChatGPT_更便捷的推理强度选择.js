@@ -2,6 +2,8 @@
 // @name         （只适用于Pro）ChatGPT 更便捷的推理强度选择（min/max）
 // @namespace    https://github.com/lueluelue2006/ChatGPT-Reasoning-Effort-Toggle
 // @version      0.4.1
+// @downloadURL  https://raw.githubusercontent.com/lueluelue2006/ChatGPT-Reasoning-Effort-Toggle/main/ChatGPT_%E6%9B%B4%E4%BE%BF%E6%8D%B7%E7%9A%84%E6%8E%A8%E7%90%86%E5%BC%BA%E5%BA%A6%E9%80%89%E6%8B%A9.js
+// @updateURL    https://raw.githubusercontent.com/lueluelue2006/ChatGPT-Reasoning-Effort-Toggle/main/ChatGPT_%E6%9B%B4%E4%BE%BF%E6%8D%B7%E7%9A%84%E6%8E%A8%E7%90%86%E5%BC%BA%E5%BA%A6%E9%80%89%E6%8B%A9.js
 // @description  在输入框附近添加 min/max 按钮，按需强制请求中的 reasoning effort。
 // @author       schweigen
 // @license      MIT
