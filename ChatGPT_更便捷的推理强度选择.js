@@ -1,10 +1,10 @@
 // ==UserScript==
-// @name         （只适用于Pro）ChatGPT 更便捷的推理强度选择（min/max）
+// @name         ChatGPT 更便捷的推理强度选择（min/max，Pro 模型自动禁用）
 // @namespace    https://github.com/lueluelue2006/ChatGPT-Reasoning-Effort-Toggle
-// @version      0.4.1
+// @version      0.5
 // @downloadURL  https://raw.githubusercontent.com/lueluelue2006/ChatGPT-Reasoning-Effort-Toggle/main/ChatGPT_%E6%9B%B4%E4%BE%BF%E6%8D%B7%E7%9A%84%E6%8E%A8%E7%90%86%E5%BC%BA%E5%BA%A6%E9%80%89%E6%8B%A9.js
 // @updateURL    https://raw.githubusercontent.com/lueluelue2006/ChatGPT-Reasoning-Effort-Toggle/main/ChatGPT_%E6%9B%B4%E4%BE%BF%E6%8D%B7%E7%9A%84%E6%8E%A8%E7%90%86%E5%BC%BA%E5%BA%A6%E9%80%89%E6%8B%A9.js
-// @description  在输入框附近添加 min/max 按钮，按需强制请求中的 reasoning effort。
+// @description  在输入框附近添加 min/max 按钮，按需强制请求中的 reasoning effort（检测到 Pro 模型时自动禁用以避免异常）。
 // @author       schweigen
 // @license      MIT
 // @match        https://chatgpt.com/*
@@ -17,9 +17,12 @@
 
   const DEBUG = false;
   const STORAGE_KEY = "tm-thinking-effort";
+  const DISABLE_ON_PRO_MODEL = true;
 
   /** @type {"min"|"max"|null} */
   let forcedEffort = null;
+  let blockedModelActive = false;
+  let proCheckTimer = null;
 
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
@@ -28,7 +31,130 @@
     // ignore
   }
 
+  function isProModelId(modelId) {
+    if (typeof modelId !== "string") return false;
+    const s = modelId.toLowerCase();
+    return /(^|[-_])pro($|[-_])/.test(s);
+  }
+
+  function isAllowedProModelId(modelId) {
+    if (typeof modelId !== "string") return false;
+    const s = modelId.toLowerCase();
+    // 你反馈：o3 pro 仍然可用
+    return s.startsWith("o3");
+  }
+
+  function isBlockedProModelId(modelId) {
+    return isProModelId(modelId) && !isAllowedProModelId(modelId);
+  }
+
+  /**
+   * @returns {"allowed"|"blocked"|null}
+   */
+  function classifyProModelLabel(text) {
+    if (typeof text !== "string") return null;
+    const s = text.trim();
+    if (!s) return null;
+    if (s.length > 80) return null;
+    if (!/\bpro\b/i.test(s)) return null;
+    if (/\bo3\b/i.test(s)) return "allowed";
+    if (/(gpt|chatgpt)/i.test(s)) return "blocked";
+    return null;
+  }
+
+  function detectProModelFromUI() {
+    if (!DISABLE_ON_PRO_MODEL) return false;
+
+    const header = document.querySelector("header");
+    const composer = document.querySelector("#thread-bottom-container");
+    const roots = [header, composer].filter(Boolean);
+
+    // 更快：只看 button / role=button（模型 UI 通常都在这些节点里）
+    const selectors = ["button", "[role='button']"];
+    const maxNodesPerRoot = 40;
+
+    let allowedFound = false;
+    let blockedFound = false;
+
+    for (const root of roots) {
+      const list = root.querySelectorAll(selectors.join(","));
+      const len = Math.min(list.length, maxNodesPerRoot);
+      for (let i = 0; i < len; i++) {
+        const el = list[i];
+        const t =
+          (el.getAttribute && (el.getAttribute("aria-label") || el.getAttribute("title"))) ||
+          "";
+        const c1 = classifyProModelLabel(t);
+        if (c1 === "allowed") allowedFound = true;
+        if (c1 === "blocked") blockedFound = true;
+        const text = (el.textContent || "").trim();
+        const c2 = classifyProModelLabel(text);
+        if (c2 === "allowed") allowedFound = true;
+        if (c2 === "blocked") blockedFound = true;
+      }
+    }
+
+    return blockedFound && !allowedFound;
+  }
+
+  function scheduleProCheck(reason) {
+    if (!DISABLE_ON_PRO_MODEL) return;
+    if (proCheckTimer) return;
+    proCheckTimer = setTimeout(() => {
+      proCheckTimer = null;
+      setBlockedModelActive(detectProModelFromUI(), reason || "scheduled");
+    }, 120);
+  }
+
+  let proObserver = null;
+  /** @type {Element[]} */
+  let proObserverRoots = [];
+
+  function setupProModelObserver() {
+    if (!DISABLE_ON_PRO_MODEL) return;
+
+    const header = document.querySelector("header");
+    const composer = document.querySelector("#thread-bottom-container");
+    const roots = [header, composer].filter(Boolean);
+    if (!roots.length) return;
+
+    const same =
+      roots.length === proObserverRoots.length && roots.every((r, i) => r === proObserverRoots[i]);
+    if (same && proObserver) return;
+
+    try {
+      if (proObserver) proObserver.disconnect();
+    } catch (_) {
+      // ignore
+    }
+    proObserverRoots = roots;
+
+    proObserver = new MutationObserver(() => scheduleProCheck("mutation"));
+    for (const root of roots) {
+      proObserver.observe(root, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+        attributes: true,
+      });
+    }
+  }
+
+  function setBlockedModelActive(next, reason) {
+    if (!DISABLE_ON_PRO_MODEL) return;
+    const boolNext = !!next;
+    if (blockedModelActive === boolNext) return;
+    blockedModelActive = boolNext;
+    if (DEBUG) console.debug("[TM] blocked model active:", blockedModelActive, reason || "");
+
+    // Pro 模型下可能不支持 thinking_effort；进入 Pro 时卸载网络补丁（避免潜在副作用），
+    // 但保留用户上次设置，离开 Pro 后自动恢复 UI。
+    if (blockedModelActive) uninstallNetworkPatch();
+    updateButtonsUI();
+  }
+
   function setForcedEffort(next) {
+    if (DISABLE_ON_PRO_MODEL && blockedModelActive && next) return;
     forcedEffort = next;
     try {
       if (next) localStorage.setItem(STORAGE_KEY, next);
@@ -46,6 +172,8 @@
   }
 
   function toggleForcedEffortMinMax() {
+    if (DISABLE_ON_PRO_MODEL) setBlockedModelActive(detectProModelFromUI(), "hotkey");
+    if (DISABLE_ON_PRO_MODEL && blockedModelActive) return;
     const effort = getForcedEffort();
     const next = effort === "min" ? "max" : "min";
     setForcedEffort(next);
@@ -78,11 +206,20 @@
   function patchBody(body) {
     const effort = getForcedEffort();
     if (!effort) return body;
+    if (DISABLE_ON_PRO_MODEL && blockedModelActive) return body;
     if (typeof body !== "string") return body;
     if (!body.includes('"thinking_effort"')) return body;
 
     try {
       const obj = JSON.parse(body);
+      if (DISABLE_ON_PRO_MODEL && obj && typeof obj.model === "string") {
+        if (isAllowedProModelId(obj.model)) {
+          setBlockedModelActive(false, `request model=${obj.model}`);
+        } else if (isBlockedProModelId(obj.model)) {
+          setBlockedModelActive(true, `request model=${obj.model}`);
+          return body;
+        }
+      }
       const changed = forceKeyDeep(obj, "thinking_effort", effort);
       if (changed) return JSON.stringify(obj);
       return body;
@@ -166,8 +303,23 @@
     if (DEBUG) console.debug("[TM] network patch installed");
   }
 
+  function uninstallNetworkPatch() {
+    if (!networkPatched) return;
+    try {
+      if (originalFetch) window.fetch = originalFetch;
+      if (originalXhrOpen) XMLHttpRequest.prototype.open = originalXhrOpen;
+      if (originalXhrSend) XMLHttpRequest.prototype.send = originalXhrSend;
+    } catch (_) {
+      // ignore
+    }
+    networkPatched = false;
+    if (DEBUG) console.debug("[TM] network patch uninstalled");
+  }
+
   function ensureNetworkPatchWhenNeeded() {
     if (!getForcedEffort()) return;
+    if (DISABLE_ON_PRO_MODEL) setBlockedModelActive(detectProModelFromUI(), "prepatch");
+    if (DISABLE_ON_PRO_MODEL && blockedModelActive) return;
     installNetworkPatch();
   }
 
@@ -232,6 +384,8 @@
   // ===== UI =====
   let minBtn;
   let maxBtn;
+  let minSeal;
+  let maxSeal;
 
   // 将按钮插入输入框内部（in-flow）可能会把 composer 撑高，导致消息区底部出现额外留白；
   // 默认关闭，改为用 fixed “挂件”方式贴在输入框旁边。
@@ -245,6 +399,7 @@
     cursor:pointer; user-select:none;
     transition:all .2s ease; border:1px solid rgba(255,255,255,.12);
     color:#e5e7eb; background:rgba(255,255,255,.06);
+    position:relative; overflow:hidden;
   `;
 
   // 选中态配色：min 偏蓝、max 偏红
@@ -256,6 +411,24 @@
   const activeMaxCss = `
     background: linear-gradient(140.91deg, #ff5c5c 12.61%, #ff2d55 76.89%);
     color:#fff; border-color:transparent;
+  `;
+
+  // “封印”层：紫色叉号覆盖在按钮上（不把按钮变灰）
+  const sealedOverlayCss = `
+    position:absolute; inset:0;
+    pointer-events:none;
+    border-radius:9999px;
+    background:
+      linear-gradient(45deg, transparent 44%, rgba(34, 197, 94, 1) 44%, rgba(34, 197, 94, 1) 56%, transparent 56%),
+      linear-gradient(-45deg, transparent 44%, rgba(34, 197, 94, 1) 44%, rgba(34, 197, 94, 1) 56%, transparent 56%);
+    box-shadow: inset 0 0 0 2px rgba(167, 243, 208, .95), 0 0 22px rgba(34, 197, 94, .50);
+    filter: drop-shadow(0 0 10px rgba(34, 197, 94, .75)) drop-shadow(0 0 22px rgba(16, 185, 129, .55));
+    opacity:1;
+  `;
+
+  // 禁用时：让按钮本体稍暗一点点（红/蓝选中态也会同步变暗）
+  const disabledTintCss = `
+    filter: brightness(.86) saturate(.9);
   `;
 
   // 垂直排列：上 max 下 min
@@ -283,10 +456,29 @@
   function updateButtonsUI() {
     if (!minBtn || !maxBtn) return;
     const effort = getForcedEffort();
-    minBtn.style.cssText = baseBtnCss + (effort === "min" ? activeMinCss : "");
-    maxBtn.style.cssText = baseBtnCss + (effort === "max" ? activeMaxCss : "");
+    const disabled = DISABLE_ON_PRO_MODEL && blockedModelActive;
+    const tint = disabled ? disabledTintCss : "";
+    minBtn.style.cssText = baseBtnCss + (effort === "min" ? activeMinCss : "") + tint;
+    maxBtn.style.cssText = baseBtnCss + (effort === "max" ? activeMaxCss : "") + tint;
     minBtn.setAttribute("aria-pressed", effort === "min" ? "true" : "false");
     maxBtn.setAttribute("aria-pressed", effort === "max" ? "true" : "false");
+    minBtn.setAttribute("aria-disabled", disabled ? "true" : "false");
+    maxBtn.setAttribute("aria-disabled", disabled ? "true" : "false");
+
+    if (disabled) {
+      minBtn.title = "检测到 Pro 模型：已自动禁用（避免异常）";
+      maxBtn.title = "检测到 Pro 模型：已自动禁用（避免异常）";
+    } else {
+      minBtn.title = "强制 thinking_effort=min（再次点击取消）";
+      maxBtn.title = "强制 thinking_effort=max（再次点击取消）";
+    }
+
+    if (minSeal) minSeal.style.cssText = sealedOverlayCss + (disabled ? "" : "display:none;");
+    if (maxSeal) maxSeal.style.cssText = sealedOverlayCss + (disabled ? "" : "display:none;");
+
+    const cursor = disabled ? "not-allowed" : "pointer";
+    minBtn.style.cursor = cursor;
+    maxBtn.style.cursor = cursor;
   }
 
   function findTrailingContainer() {
@@ -335,7 +527,7 @@
     const wRect = wrap.getBoundingClientRect();
 
     const left = rect.left - wRect.width - 8;
-	    const top = rect.top + (rect.height - wRect.height) / 2 - 6;
+    const top = rect.top + (rect.height - wRect.height) / 2 - 6;
 
     wrap.style.cssText = pendantWrapCss;
     wrap.style.left = `${Math.max(4, left)}px`;
@@ -350,8 +542,12 @@
     minBtn = document.createElement("div");
     minBtn.id = "tm-effort-min-btn";
     minBtn.textContent = "min";
-    minBtn.title = "强制 thinking_effort=min（再次点击取消）";
+    minSeal = document.createElement("div");
+    minSeal.setAttribute("aria-hidden", "true");
+    minBtn.appendChild(minSeal);
     minBtn.addEventListener("click", () => {
+      if (DISABLE_ON_PRO_MODEL) setBlockedModelActive(detectProModelFromUI(), "click");
+      if (DISABLE_ON_PRO_MODEL && blockedModelActive) return;
       const next = forcedEffort === "min" ? null : "min";
       setForcedEffort(next);
     });
@@ -359,8 +555,12 @@
     maxBtn = document.createElement("div");
     maxBtn.id = "tm-effort-max-btn";
     maxBtn.textContent = "max";
-    maxBtn.title = "强制 thinking_effort=max（再次点击取消）";
+    maxSeal = document.createElement("div");
+    maxSeal.setAttribute("aria-hidden", "true");
+    maxBtn.appendChild(maxSeal);
     maxBtn.addEventListener("click", () => {
+      if (DISABLE_ON_PRO_MODEL) setBlockedModelActive(detectProModelFromUI(), "click");
+      if (DISABLE_ON_PRO_MODEL && blockedModelActive) return;
       const next = forcedEffort === "max" ? null : "max";
       setForcedEffort(next);
     });
@@ -427,6 +627,8 @@
 
   function boot() {
     if (!document.body) return;
+    setupProModelObserver();
+    scheduleProCheck("ui");
     addEffortButtons();
   }
 
