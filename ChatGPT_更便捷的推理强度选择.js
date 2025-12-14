@@ -1,643 +1,272 @@
 // ==UserScript==
-// @name         ChatGPT 更便捷的推理强度选择（min/max，Pro 模型自动禁用）
+// @name         ChatGPT 推理强度快捷切换（⌘O：Light ↔ Heavy / Standard ↔ Extended）
 // @namespace    https://github.com/lueluelue2006/ChatGPT-Reasoning-Effort-Toggle
-// @version      0.5
-// @downloadURL  https://raw.githubusercontent.com/lueluelue2006/ChatGPT-Reasoning-Effort-Toggle/main/ChatGPT_%E6%9B%B4%E4%BE%BF%E6%8D%B7%E7%9A%84%E6%8E%A8%E7%90%86%E5%BC%BA%E5%BA%A6%E9%80%89%E6%8B%A9.js
-// @updateURL    https://raw.githubusercontent.com/lueluelue2006/ChatGPT-Reasoning-Effort-Toggle/main/ChatGPT_%E6%9B%B4%E4%BE%BF%E6%8D%B7%E7%9A%84%E6%8E%A8%E7%90%86%E5%BC%BA%E5%BA%A6%E9%80%89%E6%8B%A9.js
-// @description  在输入框附近添加 min/max 按钮，按需强制请求中的 reasoning effort（检测到 Pro 模型时自动禁用以避免异常）。
+// @version      1.0
+// @description  在 chatgpt.com 使用 ⌘O 切换推理强度：5.2 Thinking(四档)在 Light↔Heavy 之间切；5.2 Pro(两档)在 Standard↔Extended 之间切；每次切换会在控制台输出检测模式与目标档位。
 // @author       schweigen
 // @license      MIT
 // @match        https://chatgpt.com/*
 // @run-at       document-idle
 // @grant        none
+// @downloadURL  https://raw.githubusercontent.com/lueluelue2006/ChatGPT-Reasoning-Effort-Toggle/main/ChatGPT_%E6%9B%B4%E4%BE%BF%E6%8D%B7%E7%9A%84%E6%8E%A8%E7%90%86%E5%BC%BA%E5%BA%A6%E9%80%89%E6%8B%A9.js
+// @updateURL    https://raw.githubusercontent.com/lueluelue2006/ChatGPT-Reasoning-Effort-Toggle/main/ChatGPT_%E6%9B%B4%E4%BE%BF%E6%8D%B7%E7%9A%84%E6%8E%A8%E7%90%86%E5%BC%BA%E5%BA%A6%E9%80%89%E6%8B%A9.js
 // ==/UserScript==
 
-(function () {
+(() => {
   "use strict";
 
   const DEBUG = false;
-  const STORAGE_KEY = "tm-thinking-effort";
-  const DISABLE_ON_PRO_MODEL = true;
+  const LOG_PREFIX = "[TM][ThinkingToggle]";
 
-  /** @type {"min"|"max"|null} */
-  let forcedEffort = null;
-  let blockedModelActive = false;
-  let proCheckTimer = null;
+  let busy = false;
 
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved === "min" || saved === "max") forcedEffort = saved;
-  } catch (_) {
-    // ignore
+  function log(...args) {
+    if (!DEBUG) return;
+    // eslint-disable-next-line no-console
+    console.debug(LOG_PREFIX, ...args);
   }
 
-  function isProModelId(modelId) {
-    if (typeof modelId !== "string") return false;
-    const s = modelId.toLowerCase();
-    return /(^|[-_])pro($|[-_])/.test(s);
+  function info(message) {
+    // eslint-disable-next-line no-console
+    console.log(LOG_PREFIX, message);
   }
 
-  function isAllowedProModelId(modelId) {
-    if (typeof modelId !== "string") return false;
-    const s = modelId.toLowerCase();
-    // 你反馈：o3 pro 仍然可用
-    return s.startsWith("o3");
+  function warn(message) {
+    // eslint-disable-next-line no-console
+    console.warn(LOG_PREFIX, message);
   }
 
-  function isBlockedProModelId(modelId) {
-    return isProModelId(modelId) && !isAllowedProModelId(modelId);
+  function error(message, err) {
+    // eslint-disable-next-line no-console
+    if (typeof err === "undefined") console.error(LOG_PREFIX, message);
+    else console.error(LOG_PREFIX, message, err);
   }
 
-  /**
-   * @returns {"allowed"|"blocked"|null}
-   */
-  function classifyProModelLabel(text) {
-    if (typeof text !== "string") return null;
-    const s = text.trim();
-    if (!s) return null;
-    if (s.length > 80) return null;
-    if (!/\bpro\b/i.test(s)) return null;
-    if (/\bo3\b/i.test(s)) return "allowed";
-    if (/(gpt|chatgpt)/i.test(s)) return "blocked";
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function isHotkey(event) {
+    if (!event.metaKey) return false;
+    if (event.ctrlKey || event.altKey || event.shiftKey) return false;
+
+    const code = typeof event.code === "string" ? event.code : "";
+    const key = typeof event.key === "string" ? event.key : "";
+    return code === "KeyO" || key.toLowerCase() === "o";
+  }
+
+  function clickLikeUser(el) {
+    if (!(el instanceof Element)) return false;
+    try {
+      el.focus?.();
+    } catch (_) {
+      // ignore
+    }
+
+    const base = { bubbles: true, cancelable: true };
+
+    try {
+      el.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          ...base,
+          pointerId: 1,
+          pointerType: "mouse",
+          isPrimary: true,
+        })
+      );
+      el.dispatchEvent(
+        new PointerEvent("pointerup", {
+          ...base,
+          pointerId: 1,
+          pointerType: "mouse",
+          isPrimary: true,
+        })
+      );
+    } catch (_) {
+      // ignore
+    }
+
+    el.dispatchEvent(new MouseEvent("mousedown", base));
+    el.dispatchEvent(new MouseEvent("mouseup", base));
+    el.dispatchEvent(new MouseEvent("click", base));
+    return true;
+  }
+
+  function getComposerRoot() {
+    return document.querySelector("#thread-bottom-container") || document.body;
+  }
+
+  function listComposerPills() {
+    const root = getComposerRoot();
+    return Array.from(
+      root.querySelectorAll(
+        "button.__composer-pill[aria-haspopup='menu'],button.__composer-pill"
+      )
+    ).filter((el) => el instanceof HTMLButtonElement);
+  }
+
+  function getEffortItems(menu) {
+    const items = Array.from(menu.querySelectorAll("[role='menuitemradio']"));
+    /** @type {Element|null} */
+    let light = null;
+    /** @type {Element|null} */
+    let standard = null;
+    /** @type {Element|null} */
+    let extended = null;
+    /** @type {Element|null} */
+    let heavy = null;
+
+    for (const item of items) {
+      const t = (item.textContent || "").trim().toLowerCase();
+      if (!light && /\blight\b/.test(t)) light = item;
+      if (!standard && /\bstandard\b/.test(t)) standard = item;
+      if (!extended && /\bextended\b/.test(t)) extended = item;
+      if (!heavy && /\bheavy\b/.test(t)) heavy = item;
+    }
+
+    return { light, standard, extended, heavy };
+  }
+
+  function menuHasEffortOptions(menu) {
+    const { light, standard, extended, heavy } = getEffortItems(menu);
+    const hasTwo = !!standard && !!extended;
+    const hasFourExtremes = !!light && !!heavy;
+    return hasTwo || hasFourExtremes;
+  }
+
+  function findMenuForPill(pill) {
+    if (!(pill instanceof Element)) return null;
+    const labelId = typeof pill.id === "string" ? pill.id : "";
+    if (!labelId) return null;
+
+    const menus = Array.from(document.querySelectorAll("[role='menu']"));
+    for (const menu of menus) {
+      if (menu.getAttribute("aria-labelledby") === labelId) return menu;
+    }
     return null;
   }
 
-  function detectProModelFromUI() {
-    if (!DISABLE_ON_PRO_MODEL) return false;
+  async function openThinkingMenu(pill) {
+    clickLikeUser(pill);
+    await sleep(60);
+    if (pill.getAttribute("aria-expanded") === "true") return true;
+    if (pill.getAttribute("data-state") === "open") return true;
 
-    const header = document.querySelector("header");
-    const composer = document.querySelector("#thread-bottom-container");
-    const roots = [header, composer].filter(Boolean);
-
-    // 更快：只看 button / role=button（模型 UI 通常都在这些节点里）
-    const selectors = ["button", "[role='button']"];
-    const maxNodesPerRoot = 40;
-
-    let allowedFound = false;
-    let blockedFound = false;
-
-    for (const root of roots) {
-      const list = root.querySelectorAll(selectors.join(","));
-      const len = Math.min(list.length, maxNodesPerRoot);
-      for (let i = 0; i < len; i++) {
-        const el = list[i];
-        const t =
-          (el.getAttribute && (el.getAttribute("aria-label") || el.getAttribute("title"))) ||
-          "";
-        const c1 = classifyProModelLabel(t);
-        if (c1 === "allowed") allowedFound = true;
-        if (c1 === "blocked") blockedFound = true;
-        const text = (el.textContent || "").trim();
-        const c2 = classifyProModelLabel(text);
-        if (c2 === "allowed") allowedFound = true;
-        if (c2 === "blocked") blockedFound = true;
-      }
-    }
-
-    return blockedFound && !allowedFound;
-  }
-
-  function scheduleProCheck(reason) {
-    if (!DISABLE_ON_PRO_MODEL) return;
-    if (proCheckTimer) return;
-    proCheckTimer = setTimeout(() => {
-      proCheckTimer = null;
-      setBlockedModelActive(detectProModelFromUI(), reason || "scheduled");
-    }, 120);
-  }
-
-  let proObserver = null;
-  /** @type {Element[]} */
-  let proObserverRoots = [];
-
-  function setupProModelObserver() {
-    if (!DISABLE_ON_PRO_MODEL) return;
-
-    const header = document.querySelector("header");
-    const composer = document.querySelector("#thread-bottom-container");
-    const roots = [header, composer].filter(Boolean);
-    if (!roots.length) return;
-
-    const same =
-      roots.length === proObserverRoots.length && roots.every((r, i) => r === proObserverRoots[i]);
-    if (same && proObserver) return;
-
-    try {
-      if (proObserver) proObserver.disconnect();
-    } catch (_) {
-      // ignore
-    }
-    proObserverRoots = roots;
-
-    proObserver = new MutationObserver(() => scheduleProCheck("mutation"));
-    for (const root of roots) {
-      proObserver.observe(root, {
-        subtree: true,
-        childList: true,
-        characterData: true,
-        attributes: true,
-      });
-    }
-  }
-
-  function setBlockedModelActive(next, reason) {
-    if (!DISABLE_ON_PRO_MODEL) return;
-    const boolNext = !!next;
-    if (blockedModelActive === boolNext) return;
-    blockedModelActive = boolNext;
-    if (DEBUG) console.debug("[TM] blocked model active:", blockedModelActive, reason || "");
-
-    // Pro 模型下可能不支持 thinking_effort；进入 Pro 时卸载网络补丁（避免潜在副作用），
-    // 但保留用户上次设置，离开 Pro 后自动恢复 UI。
-    if (blockedModelActive) uninstallNetworkPatch();
-    updateButtonsUI();
-  }
-
-  function setForcedEffort(next) {
-    if (DISABLE_ON_PRO_MODEL && blockedModelActive && next) return;
-    forcedEffort = next;
-    try {
-      if (next) localStorage.setItem(STORAGE_KEY, next);
-      else localStorage.removeItem(STORAGE_KEY);
-    } catch (_) {
-      // ignore
-    }
-    ensureNetworkPatchWhenNeeded();
-    updateButtonsUI();
-    if (DEBUG) console.debug("[TM] thinking_effort forced:", forcedEffort);
-  }
-
-  function getForcedEffort() {
-    return forcedEffort;
-  }
-
-  function toggleForcedEffortMinMax() {
-    if (DISABLE_ON_PRO_MODEL) setBlockedModelActive(detectProModelFromUI(), "hotkey");
-    if (DISABLE_ON_PRO_MODEL && blockedModelActive) return;
-    const effort = getForcedEffort();
-    const next = effort === "min" ? "max" : "min";
-    setForcedEffort(next);
-  }
-
-  function forceKeyDeep(obj, keyName, forcedValue) {
-    let changed = false;
-
-    if (!obj || typeof obj !== "object") return false;
-
-    if (Array.isArray(obj)) {
-      for (const v of obj) changed = forceKeyDeep(v, keyName, forcedValue) || changed;
-      return changed;
-    }
-
-    for (const k of Object.keys(obj)) {
-      if (k === keyName) {
-        if (obj[k] !== forcedValue) {
-          obj[k] = forcedValue;
-          changed = true;
-        }
-      } else {
-        changed = forceKeyDeep(obj[k], keyName, forcedValue) || changed;
-      }
-    }
-
-    return changed;
-  }
-
-  function patchBody(body) {
-    const effort = getForcedEffort();
-    if (!effort) return body;
-    if (DISABLE_ON_PRO_MODEL && blockedModelActive) return body;
-    if (typeof body !== "string") return body;
-    if (!body.includes('"thinking_effort"')) return body;
-
-    try {
-      const obj = JSON.parse(body);
-      if (DISABLE_ON_PRO_MODEL && obj && typeof obj.model === "string") {
-        if (isAllowedProModelId(obj.model)) {
-          setBlockedModelActive(false, `request model=${obj.model}`);
-        } else if (isBlockedProModelId(obj.model)) {
-          setBlockedModelActive(true, `request model=${obj.model}`);
-          return body;
-        }
-      }
-      const changed = forceKeyDeep(obj, "thinking_effort", effort);
-      if (changed) return JSON.stringify(obj);
-      return body;
-    } catch (_) {
-      const re = /("thinking_effort"\s*:\s*)"(.*?)"/g;
-      return body.replace(re, `$1"${effort}"`);
-    }
-  }
-
-  // ===== Network patch =====
-  // 不在 document-start 阶段立即替换 fetch/XHR：部分站点会在早期做 feature-detect / 初始化，
-  // 提前 monkey patch 可能产生副作用（例如布局/滚动行为异常）。这里延迟到页面可用后再安装，
-  // 且只在“确实需要强制 min/max”时安装。
-  let networkPatched = false;
-  let originalFetch = null;
-  let originalXhrOpen = null;
-  let originalXhrSend = null;
-
-  function installNetworkPatch() {
-    if (networkPatched) return;
-    if (typeof window.fetch !== "function") return;
-
-    originalFetch = window.fetch;
-    window.fetch = async function (input, init) {
-      try {
-        if (init && typeof init.body === "string") {
-          const patched = patchBody(init.body);
-          if (patched !== init.body) {
-            if (DEBUG) console.debug("[TM] patched fetch init.body");
-            const newInit = Object.assign({}, init, { body: patched });
-            return originalFetch.call(this, input, newInit);
-          }
-        }
-
-        if (input instanceof Request && !init) {
-          const method = (input.method || "GET").toUpperCase();
-          if (method !== "GET" && method !== "HEAD") {
-            const txt = await input.clone().text();
-            if (txt && txt.includes('"thinking_effort"')) {
-              const patched = patchBody(txt);
-              if (patched !== txt) {
-                if (DEBUG) console.debug("[TM] patched fetch Request body");
-                const newReq = new Request(input, { body: patched });
-                return originalFetch.call(this, newReq);
-              }
-            }
-          }
-        }
-      } catch (_) {
-        // ignore
-      }
-
-      return originalFetch.call(this, input, init);
-    };
-
-    originalXhrOpen = XMLHttpRequest.prototype.open;
-    originalXhrSend = XMLHttpRequest.prototype.send;
-
-    XMLHttpRequest.prototype.open = function (method, url, ...rest) {
-      this.__tm_method = method;
-      this.__tm_url = url;
-      return originalXhrOpen.call(this, method, url, ...rest);
-    };
-
-    XMLHttpRequest.prototype.send = function (body) {
-      try {
-        if (typeof body === "string" && body.includes('"thinking_effort"')) {
-          const patched = patchBody(body);
-          if (patched !== body) {
-            if (DEBUG) console.debug("[TM] patched XHR body");
-            body = patched;
-          }
-        }
-      } catch (_) {
-        // ignore
-      }
-      return originalXhrSend.call(this, body);
-    };
-
-    networkPatched = true;
-    if (DEBUG) console.debug("[TM] network patch installed");
-  }
-
-  function uninstallNetworkPatch() {
-    if (!networkPatched) return;
-    try {
-      if (originalFetch) window.fetch = originalFetch;
-      if (originalXhrOpen) XMLHttpRequest.prototype.open = originalXhrOpen;
-      if (originalXhrSend) XMLHttpRequest.prototype.send = originalXhrSend;
-    } catch (_) {
-      // ignore
-    }
-    networkPatched = false;
-    if (DEBUG) console.debug("[TM] network patch uninstalled");
-  }
-
-  function ensureNetworkPatchWhenNeeded() {
-    if (!getForcedEffort()) return;
-    if (DISABLE_ON_PRO_MODEL) setBlockedModelActive(detectProModelFromUI(), "prepatch");
-    if (DISABLE_ON_PRO_MODEL && blockedModelActive) return;
-    installNetworkPatch();
-  }
-
-  function isLikelyComposerTarget(target) {
-    if (!(target instanceof Element)) return false;
+    clickLikeUser(pill);
+    await sleep(120);
     return (
-      !!target.closest('form[data-type="unified-composer"]') ||
-      !!target.closest('[data-testid="composer"]') ||
-      !!target.closest("#thread-bottom-container")
+      pill.getAttribute("aria-expanded") === "true" || pill.getAttribute("data-state") === "open"
     );
   }
 
-  function setupSendHooks() {
-    // 在用户“即将发送”之前再安装网络补丁，尽量避免影响站点初始化/布局。
-    document.addEventListener(
-      "submit",
-      (event) => {
-        if (!getForcedEffort()) return;
-        if (!isLikelyComposerTarget(event.target)) return;
-        ensureNetworkPatchWhenNeeded();
-      },
-      true
-    );
+  async function findEffortPill() {
+    const pills = listComposerPills();
+    if (!pills.length) return null;
+    if (pills.length === 1) return pills[0];
 
-    document.addEventListener(
-      "keydown",
-      (event) => {
-        if (!getForcedEffort()) return;
-        if (event.key !== "Enter") return;
-        if (event.shiftKey || event.altKey || event.metaKey) return;
-        if (event.isComposing) return;
-        if (!isLikelyComposerTarget(event.target)) return;
-        ensureNetworkPatchWhenNeeded();
-      },
-      true
-    );
-  }
+    /** @type {HTMLButtonElement[]} */
+    const ordered = [];
 
-  function setupHotkeys() {
-    // 在捕获阶段尽早拦截：先禁用站点/浏览器默认 Cmd+O，再用它切换 min/max
-    window.addEventListener(
-      "keydown",
-      (event) => {
-        if (!event.metaKey) return;
-        if (event.ctrlKey || event.altKey || event.shiftKey) return;
-
-        const code = typeof event.code === "string" ? event.code : "";
-        const key = typeof event.key === "string" ? event.key : "";
-        if (code !== "KeyO" && key.toLowerCase() !== "o") return;
-
-        event.preventDefault();
-        event.stopPropagation();
-        event.stopImmediatePropagation();
-
-        if (event.repeat) return;
-        toggleForcedEffortMinMax();
-      },
-      true
-    );
-  }
-
-  // ===== UI =====
-  let minBtn;
-  let maxBtn;
-  let minSeal;
-  let maxSeal;
-
-  // 将按钮插入输入框内部（in-flow）可能会把 composer 撑高，导致消息区底部出现额外留白；
-  // 默认关闭，改为用 fixed “挂件”方式贴在输入框旁边。
-  const INLINE_IN_COMPOSER = false;
-
-  const baseBtnCss = `
-    display:flex; align-items:center; justify-content:center;
-    height:36px; min-width:56px; padding:0 14px;
-    border-radius:9999px;
-    font-weight:700; font-size:12px; line-height:1;
-    cursor:pointer; user-select:none;
-    transition:all .2s ease; border:1px solid rgba(255,255,255,.12);
-    color:#e5e7eb; background:rgba(255,255,255,.06);
-    position:relative; overflow:hidden;
-  `;
-
-  // 选中态配色：min 偏蓝、max 偏红
-  const activeMinCss = `
-    background: linear-gradient(140.91deg, #5b8cff 12.61%, #2f6bff 76.89%);
-    color:#fff; border-color:transparent;
-  `;
-
-  const activeMaxCss = `
-    background: linear-gradient(140.91deg, #ff5c5c 12.61%, #ff2d55 76.89%);
-    color:#fff; border-color:transparent;
-  `;
-
-  // “封印”层：紫色叉号覆盖在按钮上（不把按钮变灰）
-  const sealedOverlayCss = `
-    position:absolute; inset:0;
-    pointer-events:none;
-    border-radius:9999px;
-    background:
-      linear-gradient(45deg, transparent 44%, rgba(34, 197, 94, 1) 44%, rgba(34, 197, 94, 1) 56%, transparent 56%),
-      linear-gradient(-45deg, transparent 44%, rgba(34, 197, 94, 1) 44%, rgba(34, 197, 94, 1) 56%, transparent 56%);
-    box-shadow: inset 0 0 0 2px rgba(167, 243, 208, .95), 0 0 22px rgba(34, 197, 94, .50);
-    filter: drop-shadow(0 0 10px rgba(34, 197, 94, .75)) drop-shadow(0 0 22px rgba(16, 185, 129, .55));
-    opacity:1;
-  `;
-
-  // 禁用时：让按钮本体稍暗一点点（红/蓝选中态也会同步变暗）
-  const disabledTintCss = `
-    filter: brightness(.86) saturate(.9);
-  `;
-
-  // 垂直排列：上 max 下 min
-  const inlineWrapCss =
-    "display:flex; flex-direction:column; align-items:center; gap:6px; flex-shrink:0; margin-inline:6px;";
-
-  const floatingWrapCss =
-    "display:flex; align-items:center; gap:6px; position:fixed; z-index:2147483647; padding:4px 6px; border-radius:9999px; background:rgba(0,0,0,.35); backdrop-filter:blur(6px);";
-
-  // “挂件”样式：固定在输入框左侧外部
-  const pendantWrapCss =
-    "display:flex; flex-direction:column; align-items:center; gap:6px; position:fixed; z-index:2147483647; padding:6px 8px; border-radius:12px; background:rgba(0,0,0,.35); backdrop-filter:blur(6px);";
-
-  function ensureWrapOnBody(wrap) {
-    if (!document.body) return false;
-    if (wrap.parentElement !== document.body) document.body.appendChild(wrap);
-    return true;
-  }
-
-  function parkWrapOffscreen(wrap) {
-    wrap.style.cssText = pendantWrapCss + "visibility:hidden; left:-9999px; top:-9999px;";
-    ensureWrapOnBody(wrap);
-  }
-
-  function updateButtonsUI() {
-    if (!minBtn || !maxBtn) return;
-    const effort = getForcedEffort();
-    const disabled = DISABLE_ON_PRO_MODEL && blockedModelActive;
-    const tint = disabled ? disabledTintCss : "";
-    minBtn.style.cssText = baseBtnCss + (effort === "min" ? activeMinCss : "") + tint;
-    maxBtn.style.cssText = baseBtnCss + (effort === "max" ? activeMaxCss : "") + tint;
-    minBtn.setAttribute("aria-pressed", effort === "min" ? "true" : "false");
-    maxBtn.setAttribute("aria-pressed", effort === "max" ? "true" : "false");
-    minBtn.setAttribute("aria-disabled", disabled ? "true" : "false");
-    maxBtn.setAttribute("aria-disabled", disabled ? "true" : "false");
-
-    if (disabled) {
-      minBtn.title = "检测到 Pro 模型：已自动禁用（避免异常）";
-      maxBtn.title = "检测到 Pro 模型：已自动禁用（避免异常）";
-    } else {
-      minBtn.title = "强制 thinking_effort=min（再次点击取消）";
-      maxBtn.title = "强制 thinking_effort=max（再次点击取消）";
+    const active = document.activeElement;
+    if (active instanceof HTMLButtonElement && active.matches("button.__composer-pill")) {
+      ordered.push(active);
     }
 
-    if (minSeal) minSeal.style.cssText = sealedOverlayCss + (disabled ? "" : "display:none;");
-    if (maxSeal) maxSeal.style.cssText = sealedOverlayCss + (disabled ? "" : "display:none;");
+    const likely = pills.filter((p) => /thinking|pro/i.test((p.textContent || "").trim()));
+    for (const p of likely) if (!ordered.includes(p)) ordered.push(p);
+    for (const p of pills) if (!ordered.includes(p)) ordered.push(p);
 
-    const cursor = disabled ? "not-allowed" : "pointer";
-    minBtn.style.cursor = cursor;
-    maxBtn.style.cursor = cursor;
-  }
+    for (const pill of ordered) {
+      const opened = await openThinkingMenu(pill);
+      if (!opened) continue;
 
-  function findTrailingContainer() {
-    let container = document.querySelector('div[data-testid="composer-trailing-actions"]');
-    if (!container) {
-      container = document.querySelector('form[data-type="unified-composer"] div[class*="[grid-area:trailing]"]');
-    }
-    if (!container) {
-      const speechContainer = document.querySelector('div[data-testid="composer-speech-button-container"]');
-      if (speechContainer && speechContainer.parentElement) {
-        container = speechContainer.parentElement;
+      /** @type {Element|null} */
+      let menu = null;
+      for (let i = 0; i < 8; i++) {
+        menu = findMenuForPill(pill);
+        if (menu) break;
+        await sleep(40);
       }
-    }
-    return container || null;
-  }
 
-  function findLeftContainer() {
-    let container = document.querySelector('#thread-bottom-container [data-testid="composer-footer-actions"]');
-    if (container) return container;
-    const plusAnchor = document.querySelector('#thread-bottom-container div > div.absolute.start-2\\.5.bottom-2\\.5');
-    if (plusAnchor && plusAnchor.parentElement) return plusAnchor.parentElement;
-    return null;
-  }
+      if (menu && menuHasEffortOptions(menu)) return pill;
 
-  function findComposerAnchor() {
-    return (
-      document.querySelector('form[data-type="unified-composer"]') ||
-      document.querySelector('[data-testid="composer"]') ||
-      document.querySelector("#thread-bottom-container")
-    );
-  }
-
-  function tryPendantLeft(wrap) {
-    const anchor = findComposerAnchor();
-    if (!anchor) {
-      // 找不到锚点时也要保证 wrap 不在输入框内部（避免撑高 composer 造成底部留白）
-      parkWrapOffscreen(wrap);
-      return false;
+      // 不是推理强度菜单：关掉再继续试下一个
+      clickLikeUser(pill);
+      await sleep(60);
     }
 
-    // 先挂到 body 上再测量定位
-    ensureWrapOnBody(wrap);
-    wrap.style.cssText = pendantWrapCss + "visibility:hidden;";
-
-    const rect = anchor.getBoundingClientRect();
-    const wRect = wrap.getBoundingClientRect();
-
-    const left = rect.left - wRect.width - 8;
-    const top = rect.top + (rect.height - wRect.height) / 2 - 6;
-
-    wrap.style.cssText = pendantWrapCss;
-    wrap.style.left = `${Math.max(4, left)}px`;
-    wrap.style.top = `${Math.max(4, top)}px`;
-    return true;
+    return ordered[0] || null;
   }
 
-  function buildWrap() {
-    const wrap = document.createElement("div");
-    wrap.id = "tm-effort-btn-wrap";
+  async function toggleThinkingTime() {
+    if (busy) return;
+    busy = true;
 
-    minBtn = document.createElement("div");
-    minBtn.id = "tm-effort-min-btn";
-    minBtn.textContent = "min";
-    minSeal = document.createElement("div");
-    minSeal.setAttribute("aria-hidden", "true");
-    minBtn.appendChild(minSeal);
-    minBtn.addEventListener("click", () => {
-      if (DISABLE_ON_PRO_MODEL) setBlockedModelActive(detectProModelFromUI(), "click");
-      if (DISABLE_ON_PRO_MODEL && blockedModelActive) return;
-      const next = forcedEffort === "min" ? null : "min";
-      setForcedEffort(next);
-    });
-
-    maxBtn = document.createElement("div");
-    maxBtn.id = "tm-effort-max-btn";
-    maxBtn.textContent = "max";
-    maxSeal = document.createElement("div");
-    maxSeal.setAttribute("aria-hidden", "true");
-    maxBtn.appendChild(maxSeal);
-    maxBtn.addEventListener("click", () => {
-      if (DISABLE_ON_PRO_MODEL) setBlockedModelActive(detectProModelFromUI(), "click");
-      if (DISABLE_ON_PRO_MODEL && blockedModelActive) return;
-      const next = forcedEffort === "max" ? null : "max";
-      setForcedEffort(next);
-    });
-
-    // 一列：上 max 下 min
-    wrap.appendChild(maxBtn);
-    wrap.appendChild(minBtn);
-    updateButtonsUI();
-    return wrap;
-  }
-
-  function getOrCreateWrap() {
-    const existing = document.getElementById("tm-effort-btn-wrap");
-    if (existing) return existing;
-    return buildWrap();
-  }
-
-  function addEffortButtons() {
-    const wrap = getOrCreateWrap();
-
-    // 即使旧版本曾把 wrap 插进输入框内部，这里也强制挪到 body 下并用 fixed 脱离文档流，
-    // 避免 composer 被“撑高”后导致消息区底部出现额外空白。
-    if (!INLINE_IN_COMPOSER && wrap.isConnected && wrap.parentElement !== document.body) {
-      parkWrapOffscreen(wrap);
-    }
-
-    // 优先：作为挂件固定在输入框左侧外部
-    if (tryPendantLeft(wrap)) {
-      updateButtonsUI();
-      return true;
-    }
-
-    if (INLINE_IN_COMPOSER) {
-      const left = findLeftContainer();
-      const trailing = left ? null : findTrailingContainer();
-      const host = left || trailing;
-
-      if (host) {
-        wrap.style.cssText = inlineWrapCss;
-        if (wrap.parentElement !== host) host.appendChild(wrap);
-        updateButtonsUI();
-        return true;
+    try {
+      const pill = await findEffortPill();
+      if (!pill) {
+        warn("没找到推理强度选择器（可能当前模型/页面不支持）");
+        return;
       }
+
+      const opened = await openThinkingMenu(pill);
+      if (!opened) {
+        warn("打开推理强度菜单失败");
+        return;
+      }
+
+      /** @type {Element|null} */
+      let menu = null;
+      for (let i = 0; i < 10; i++) {
+        menu = findMenuForPill(pill);
+        if (menu && menuHasEffortOptions(menu)) break;
+        await sleep(50);
+      }
+      if (!menu) {
+        warn("没找到推理强度菜单");
+        return;
+      }
+
+      const { light, standard, extended, heavy } = getEffortItems(menu);
+
+      if (light && heavy) {
+        const heavyChecked = heavy.getAttribute("aria-checked") === "true";
+        const target = heavyChecked ? light : heavy;
+        clickLikeUser(target);
+        info(`检测到thinking模式，切换到${heavyChecked ? "Light" : "Heavy"} thinking`);
+        return;
+      }
+
+      if (!standard || !extended) {
+        warn("菜单里没看到 Standard/Extended");
+        return;
+      }
+
+      const extendedChecked = extended.getAttribute("aria-checked") === "true";
+      const target = extendedChecked ? standard : extended;
+      clickLikeUser(target);
+      info(`检测到pro模式，切换到${extendedChecked ? "Standard" : "Extended"} thinking`);
+    } catch (err) {
+      log(err);
+      error("切换失败", err);
+    } finally {
+      busy = false;
     }
-
-    // 兜底：挂到输入框左侧附近（固定定位）
-    const anchor =
-      document.querySelector("#thread-bottom-container") ||
-      document.querySelector('[data-testid="composer"]') ||
-      document.querySelector('form[data-type="unified-composer"]');
-    if (!anchor) {
-      parkWrapOffscreen(wrap);
-      return false;
-    }
-
-    const rect = anchor.getBoundingClientRect();
-    wrap.style.cssText = floatingWrapCss;
-    wrap.style.left = `${Math.max(8, rect.left + 8)}px`;
-    wrap.style.top = `${Math.max(8, rect.bottom - 48)}px`;
-    ensureWrapOnBody(wrap);
-    updateButtonsUI();
-    return true;
   }
 
-  function boot() {
-    if (!document.body) return;
-    setupProModelObserver();
-    scheduleProCheck("ui");
-    addEffortButtons();
-  }
+  window.addEventListener(
+    "keydown",
+    (event) => {
+      if (!isHotkey(event)) return;
 
-  if (document.readyState === "complete" || document.readyState === "interactive") {
-    boot();
-  } else {
-    document.addEventListener("DOMContentLoaded", boot);
-  }
-  setInterval(boot, 2000);
-  setupSendHooks();
-  setupHotkeys();
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+
+      if (event.repeat) return;
+      toggleThinkingTime();
+    },
+    true
+  );
 })();
+
