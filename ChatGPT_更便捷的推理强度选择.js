@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT 推理强度快捷切换（⌘O：Light ↔ Heavy / Standard ↔ Extended）
 // @namespace    https://github.com/lueluelue2006/ChatGPT-Reasoning-Effort-Toggle
-// @version      1.0
-// @description  在 chatgpt.com 使用 ⌘O 切换推理强度：5.2 Thinking(四档)在 Light↔Heavy 之间切；5.2 Pro(两档)在 Standard↔Extended 之间切；每次切换会在控制台输出检测模式与目标档位。
+// @version      1.1
+// @description  在 chatgpt.com 使用 ⌘O 切换推理强度：5.2 Thinking(四档)在 Light↔Heavy 之间切；5.2 Pro(两档)在 Standard↔Extended 之间切；每次切换会在控制台输出检测模式与目标档位，并让选择器闪一下提示已切换。
 // @author       schweigen
 // @license      MIT
 // @match        https://chatgpt.com/*
@@ -17,6 +17,8 @@
 
   const DEBUG = false;
   const LOG_PREFIX = "[TM][ThinkingToggle]";
+  const PULSE_STYLE_ID = "__tm_thinking_toggle_pulse_style";
+  const PULSE_CLASS = "__tm_thinking_toggle_pulse";
 
   let busy = false;
 
@@ -44,6 +46,50 @@
 
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function ensurePulseStyle() {
+    if (document.getElementById(PULSE_STYLE_ID)) return;
+    const style = document.createElement("style");
+    style.id = PULSE_STYLE_ID;
+    style.textContent = `
+@keyframes __tmThinkingTogglePulse {
+  0%   { transform: scale(1);    box-shadow: 0 0 0 0 rgba(56,189,248,0);    filter: brightness(1); }
+  45%  { transform: scale(1.06); box-shadow: 0 0 0 6px rgba(56,189,248,.35); filter: brightness(1.18); }
+  100% { transform: scale(1);    box-shadow: 0 0 0 0 rgba(56,189,248,0);    filter: brightness(1); }
+}
+button.${PULSE_CLASS} {
+  animation: __tmThinkingTogglePulse 650ms ease-in-out 0s 1;
+  will-change: transform, box-shadow, filter;
+}
+`;
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  function pulseOnce(el) {
+    if (!(el instanceof HTMLElement)) return;
+    ensurePulseStyle();
+    try {
+      el.classList.remove(PULSE_CLASS);
+      // 强制 reflow 以便重复触发动画
+      void el.offsetWidth;
+      el.classList.add(PULSE_CLASS);
+    } catch (_) {
+      // ignore
+    }
+  }
+
+  function schedulePulse(pill) {
+    window.setTimeout(() => {
+      let target = pill;
+      if (!(target instanceof HTMLElement) || !document.contains(target)) {
+        const root = getComposerRoot();
+        const pills = Array.from(root.querySelectorAll("button.__composer-pill"));
+        target =
+          pills.find((p) => /thinking|pro/i.test((p.textContent || "").trim())) || pills[0] || null;
+      }
+      if (target) pulseOnce(target);
+    }, 80);
   }
 
   function isHotkey(event) {
@@ -234,6 +280,7 @@
         const target = heavyChecked ? light : heavy;
         clickLikeUser(target);
         info(`检测到thinking模式，切换到${heavyChecked ? "Light" : "Heavy"} thinking`);
+        schedulePulse(pill);
         return;
       }
 
@@ -246,6 +293,7 @@
       const target = extendedChecked ? standard : extended;
       clickLikeUser(target);
       info(`检测到pro模式，切换到${extendedChecked ? "Standard" : "Extended"} thinking`);
+      schedulePulse(pill);
     } catch (err) {
       log(err);
       error("切换失败", err);
@@ -269,4 +317,3 @@
     true
   );
 })();
-
