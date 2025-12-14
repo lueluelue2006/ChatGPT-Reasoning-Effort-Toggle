@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT 推理强度快捷切换（⌘O：Light ↔ Heavy / Standard ↔ Extended）
 // @namespace    https://github.com/lueluelue2006/ChatGPT-Reasoning-Effort-Toggle
-// @version      1.1
-// @description  在 chatgpt.com 使用 ⌘O 切换推理强度：5.2 Thinking(四档)在 Light↔Heavy 之间切；5.2 Pro(两档)在 Standard↔Extended 之间切；每次切换会在控制台输出检测模式与目标档位，并让选择器闪一下提示已切换。
+// @version      1.2
+// @description  在 chatgpt.com 使用 ⌘O 切换推理强度：5.2 Thinking(四档)在 Light↔Heavy 之间切；5.2 Pro(两档)在 Standard↔Extended 之间切；每次切换会在控制台输出检测模式与目标档位，并让选择器闪一下提示已切换（低档蓝，高档红）。
 // @author       schweigen
 // @license      MIT
 // @match        https://chatgpt.com/*
@@ -19,6 +19,9 @@
   const LOG_PREFIX = "[TM][ThinkingToggle]";
   const PULSE_STYLE_ID = "__tm_thinking_toggle_pulse_style";
   const PULSE_CLASS = "__tm_thinking_toggle_pulse";
+  const PULSE_RGB_VAR = "--__tmThinkingTogglePulseRGB";
+  const PULSE_RGB_LOW = "56,189,248"; // blue
+  const PULSE_RGB_HIGH = "239,68,68"; // red
 
   let busy = false;
 
@@ -54,9 +57,9 @@
     style.id = PULSE_STYLE_ID;
     style.textContent = `
 @keyframes __tmThinkingTogglePulse {
-  0%   { transform: scale(1);    box-shadow: 0 0 0 0 rgba(56,189,248,0);    filter: brightness(1); }
-  45%  { transform: scale(1.06); box-shadow: 0 0 0 6px rgba(56,189,248,.35); filter: brightness(1.18); }
-  100% { transform: scale(1);    box-shadow: 0 0 0 0 rgba(56,189,248,0);    filter: brightness(1); }
+  0%   { transform: scale(1);    box-shadow: 0 0 0 0 rgba(var(${PULSE_RGB_VAR}, ${PULSE_RGB_LOW}), 0);    filter: brightness(1); }
+  45%  { transform: scale(1.06); box-shadow: 0 0 0 6px rgba(var(${PULSE_RGB_VAR}, ${PULSE_RGB_LOW}), .35); filter: brightness(1.18); }
+  100% { transform: scale(1);    box-shadow: 0 0 0 0 rgba(var(${PULSE_RGB_VAR}, ${PULSE_RGB_LOW}), 0);    filter: brightness(1); }
 }
 button.${PULSE_CLASS} {
   animation: __tmThinkingTogglePulse 650ms ease-in-out 0s 1;
@@ -66,10 +69,11 @@ button.${PULSE_CLASS} {
     (document.head || document.documentElement).appendChild(style);
   }
 
-  function pulseOnce(el) {
+  function pulseOnce(el, rgb) {
     if (!(el instanceof HTMLElement)) return;
     ensurePulseStyle();
     try {
+      el.style.setProperty(PULSE_RGB_VAR, rgb);
       el.classList.remove(PULSE_CLASS);
       // 强制 reflow 以便重复触发动画
       void el.offsetWidth;
@@ -79,7 +83,8 @@ button.${PULSE_CLASS} {
     }
   }
 
-  function schedulePulse(pill) {
+  function schedulePulse(pill, isHigh) {
+    const rgb = isHigh ? PULSE_RGB_HIGH : PULSE_RGB_LOW;
     window.setTimeout(() => {
       let target = pill;
       if (!(target instanceof HTMLElement) || !document.contains(target)) {
@@ -88,7 +93,7 @@ button.${PULSE_CLASS} {
         target =
           pills.find((p) => /thinking|pro/i.test((p.textContent || "").trim())) || pills[0] || null;
       }
-      if (target) pulseOnce(target);
+      if (target) pulseOnce(target, rgb);
     }, 80);
   }
 
@@ -280,7 +285,7 @@ button.${PULSE_CLASS} {
         const target = heavyChecked ? light : heavy;
         clickLikeUser(target);
         info(`检测到thinking模式，切换到${heavyChecked ? "Light" : "Heavy"} thinking`);
-        schedulePulse(pill);
+        schedulePulse(pill, !heavyChecked);
         return;
       }
 
@@ -293,7 +298,7 @@ button.${PULSE_CLASS} {
       const target = extendedChecked ? standard : extended;
       clickLikeUser(target);
       info(`检测到pro模式，切换到${extendedChecked ? "Standard" : "Extended"} thinking`);
-      schedulePulse(pill);
+      schedulePulse(pill, !extendedChecked);
     } catch (err) {
       log(err);
       error("切换失败", err);
