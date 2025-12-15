@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT 推理强度快捷切换（⌘O：Light ↔ Heavy / Standard ↔ Extended）
 // @namespace    https://github.com/lueluelue2006/ChatGPT-Reasoning-Effort-Toggle
-// @version      1.4
-// @description  在 chatgpt.com 使用 ⌘O 切换推理强度：5.2 Thinking(四档)在 Light↔Heavy 之间切；5.2 Pro(两档)在 Standard↔Extended 之间切；每次切换会在控制台输出检测模式与目标档位，并让选择器闪一下提示已切换（低档蓝，高档红）。本脚本会强制修改发送消息请求里的 thinking_effort，避免官网 UI 切换“看起来切了但实际没生效”。
+// @version      1.5
+// @description  在 chatgpt.com 使用 ⌘O 切换推理强度：5.2 Thinking(四档)在 Light↔Heavy 之间切；5.2 Pro(两档)在 Standard↔Extended 之间切；每次切换会在控制台输出检测模式与目标档位，并让选择器闪一下提示已切换（低档蓝，高档红）。本脚本会强制修改发送消息请求里的 thinking_effort，避免官网 UI 切换“看起来切了但实际没生效”，并在控制台提示是否已成功写入请求。
 // @author       schweigen
 // @license      MIT
 // @match        https://chatgpt.com/*
@@ -53,6 +53,19 @@
 
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function formatEffortValue(v) {
+    if (typeof v === "string" && v.trim()) return v.trim();
+    return "<none>";
+  }
+
+  function logPatchedRequest(mode, model, before, after) {
+    info(
+      `已强制写入请求：mode=${mode} model=${model || "<unknown>"} thinking_effort ${formatEffortValue(
+        before
+      )} -> ${formatEffortValue(after)}`
+    );
   }
 
   function ensurePulseStyle() {
@@ -270,8 +283,10 @@ button.${PULSE_CLASS} {
             const forced = mode ? getForcedEffort(mode) : null;
 
             if (mode && forced) {
+              const before = payload.thinking_effort;
               payload.thinking_effort = forced;
               init = { ...init, body: JSON.stringify(payload) };
+              logPatchedRequest(mode, model, before, forced);
             }
           }
 
@@ -299,7 +314,9 @@ button.${PULSE_CLASS} {
         const forced = mode ? getForcedEffort(mode) : null;
         if (!mode || !forced) return originalFetch.apply(this, arguments);
 
+        const before = payload.thinking_effort;
         payload.thinking_effort = forced;
+        logPatchedRequest(mode, model, before, forced);
 
         const headers = new Headers(request.headers);
         const patched = new Request(request.url, {
@@ -322,6 +339,8 @@ button.${PULSE_CLASS} {
         return originalFetch.apply(this, arguments);
       }
     };
+
+    info("fetch patch 已安装：会在发送时强制写入 thinking_effort（按 ⌘O 切换目标档位）");
   }
 
   installFetchPatch();
