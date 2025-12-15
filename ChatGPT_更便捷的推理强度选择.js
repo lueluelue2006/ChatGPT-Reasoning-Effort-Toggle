@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT 推理强度快捷切换（⌘O：Light ↔ Heavy / Standard ↔ Extended）
 // @namespace    https://github.com/lueluelue2006/ChatGPT-Reasoning-Effort-Toggle
-// @version      1.6
+// @version      1.7
 // @description  在 chatgpt.com 使用 ⌘O 切换推理强度：5.2 Thinking(四档)在 Light↔Heavy 之间切；5.2 Pro(两档)在 Standard↔Extended 之间切；每次切换会在控制台输出检测模式与目标档位，并让选择器闪一下提示已切换（低档蓝，高档红）。本脚本会强制修改发送消息请求里的 thinking_effort，避免官网 UI 切换“看起来切了但实际没生效”，并在控制台提示是否已成功写入请求。
 // @author       schweigen
 // @license      MIT
@@ -20,7 +20,7 @@
   const PULSE_STYLE_ID = "__tm_thinking_toggle_pulse_style";
   const PULSE_CLASS = "__tm_thinking_toggle_pulse";
   const HINT_CLASS = "__tm_thinking_toggle_hint";
-  const HINT_ATTR = "data-__tmThinkingToggleHint";
+  const HINT_ATTR = "data-tm-thinking-toggle-hint";
   const PULSE_RGB_VAR = "--__tmThinkingTogglePulseRGB";
   const PULSE_RGB_LOW = "56,189,248"; // blue
   const PULSE_RGB_HIGH = "239,68,68"; // red
