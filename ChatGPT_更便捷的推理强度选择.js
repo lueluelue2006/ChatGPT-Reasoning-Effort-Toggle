@@ -1,12 +1,12 @@
 // ==UserScript==
 // @name         ChatGPT 推理强度快捷切换（⌘O：Light ↔ Heavy / Standard ↔ Extended）
 // @namespace    https://github.com/lueluelue2006/ChatGPT-Reasoning-Effort-Toggle
-// @version      1.2
-// @description  在 chatgpt.com 使用 ⌘O 切换推理强度：5.2 Thinking(四档)在 Light↔Heavy 之间切；5.2 Pro(两档)在 Standard↔Extended 之间切；每次切换会在控制台输出检测模式与目标档位，并让选择器闪一下提示已切换（低档蓝，高档红）。
+// @version      1.3
+// @description  在 chatgpt.com 使用 ⌘O 切换推理强度：5.2 Thinking(四档)在 Light↔Heavy 之间切；5.2 Pro(两档)在 Standard↔Extended 之间切；每次切换会在控制台输出检测模式与目标档位，并让选择器闪一下提示已切换（低档蓝，高档红）。本脚本会强制修改发送消息请求里的 thinking_effort，避免官网 UI 切换“看起来切了但实际没生效”。
 // @author       schweigen
 // @license      MIT
 // @match        https://chatgpt.com/*
-// @run-at       document-idle
+// @run-at       document-start
 // @grant        none
 // @downloadURL  https://raw.githubusercontent.com/lueluelue2006/ChatGPT-Reasoning-Effort-Toggle/main/ChatGPT_%E6%9B%B4%E4%BE%BF%E6%8D%B7%E7%9A%84%E6%8E%A8%E7%90%86%E5%BC%BA%E5%BA%A6%E9%80%89%E6%8B%A9.js
 // @updateURL    https://raw.githubusercontent.com/lueluelue2006/ChatGPT-Reasoning-Effort-Toggle/main/ChatGPT_%E6%9B%B4%E4%BE%BF%E6%8D%B7%E7%9A%84%E6%8E%A8%E7%90%86%E5%BC%BA%E5%BA%A6%E9%80%89%E6%8B%A9.js
@@ -23,7 +23,17 @@
   const PULSE_RGB_LOW = "56,189,248"; // blue
   const PULSE_RGB_HIGH = "239,68,68"; // red
 
+  const FETCH_PATCH_FLAG = "__tm_thinking_toggle_fetch_patched__";
+
+  /** @type {boolean} */
   let busy = false;
+
+  /** @type {"min"|"max"|null} */
+  let forcedThinkingEffort = null;
+  /** @type {"standard"|"extended"|null} */
+  let forcedProEffort = null;
+  /** @type {string|null} */
+  let lastSeenModelSlug = null;
 
   function log(...args) {
     if (!DEBUG) return;
@@ -39,12 +49,6 @@
   function warn(message) {
     // eslint-disable-next-line no-console
     console.warn(LOG_PREFIX, message);
-  }
-
-  function error(message, err) {
-    // eslint-disable-next-line no-console
-    if (typeof err === "undefined") console.error(LOG_PREFIX, message);
-    else console.error(LOG_PREFIX, message, err);
   }
 
   function sleep(ms) {
@@ -106,43 +110,6 @@ button.${PULSE_CLASS} {
     return code === "KeyO" || key.toLowerCase() === "o";
   }
 
-  function clickLikeUser(el) {
-    if (!(el instanceof Element)) return false;
-    try {
-      el.focus?.();
-    } catch (_) {
-      // ignore
-    }
-
-    const base = { bubbles: true, cancelable: true };
-
-    try {
-      el.dispatchEvent(
-        new PointerEvent("pointerdown", {
-          ...base,
-          pointerId: 1,
-          pointerType: "mouse",
-          isPrimary: true,
-        })
-      );
-      el.dispatchEvent(
-        new PointerEvent("pointerup", {
-          ...base,
-          pointerId: 1,
-          pointerType: "mouse",
-          isPrimary: true,
-        })
-      );
-    } catch (_) {
-      // ignore
-    }
-
-    el.dispatchEvent(new MouseEvent("mousedown", base));
-    el.dispatchEvent(new MouseEvent("mouseup", base));
-    el.dispatchEvent(new MouseEvent("click", base));
-    return true;
-  }
-
   function getComposerRoot() {
     return document.querySelector("#thread-bottom-container") || document.body;
   }
@@ -156,97 +123,81 @@ button.${PULSE_CLASS} {
     ).filter((el) => el instanceof HTMLButtonElement);
   }
 
-  function getEffortItems(menu) {
-    const items = Array.from(menu.querySelectorAll("[role='menuitemradio']"));
-    /** @type {Element|null} */
-    let light = null;
-    /** @type {Element|null} */
-    let standard = null;
-    /** @type {Element|null} */
-    let extended = null;
-    /** @type {Element|null} */
-    let heavy = null;
-
-    for (const item of items) {
-      const t = (item.textContent || "").trim().toLowerCase();
-      if (!light && /\blight\b/.test(t)) light = item;
-      if (!standard && /\bstandard\b/.test(t)) standard = item;
-      if (!extended && /\bextended\b/.test(t)) extended = item;
-      if (!heavy && /\bheavy\b/.test(t)) heavy = item;
-    }
-
-    return { light, standard, extended, heavy };
-  }
-
-  function menuHasEffortOptions(menu) {
-    const { light, standard, extended, heavy } = getEffortItems(menu);
-    const hasTwo = !!standard && !!extended;
-    const hasFourExtremes = !!light && !!heavy;
-    return hasTwo || hasFourExtremes;
-  }
-
-  function findMenuForPill(pill) {
-    if (!(pill instanceof Element)) return null;
-    const labelId = typeof pill.id === "string" ? pill.id : "";
-    if (!labelId) return null;
-
-    const menus = Array.from(document.querySelectorAll("[role='menu']"));
-    for (const menu of menus) {
-      if (menu.getAttribute("aria-labelledby") === labelId) return menu;
-    }
-    return null;
-  }
-
-  async function openThinkingMenu(pill) {
-    clickLikeUser(pill);
-    await sleep(60);
-    if (pill.getAttribute("aria-expanded") === "true") return true;
-    if (pill.getAttribute("data-state") === "open") return true;
-
-    clickLikeUser(pill);
-    await sleep(120);
-    return (
-      pill.getAttribute("aria-expanded") === "true" || pill.getAttribute("data-state") === "open"
-    );
-  }
-
   async function findEffortPill() {
     const pills = listComposerPills();
     if (!pills.length) return null;
     if (pills.length === 1) return pills[0];
 
-    /** @type {HTMLButtonElement[]} */
-    const ordered = [];
+    const likely = pills.find((p) => /thinking|pro/i.test((p.textContent || "").trim()));
+    return likely || pills[0] || null;
+  }
 
-    const active = document.activeElement;
-    if (active instanceof HTMLButtonElement && active.matches("button.__composer-pill")) {
-      ordered.push(active);
+  function normalizeText(s) {
+    return (s || "").toString().trim();
+  }
+
+  function getModelSelectorText() {
+    const btn =
+      document.querySelector('button[aria-label*=\"current model is\"]') ||
+      document.querySelector('button[aria-label^=\"Model selector\"]');
+    const aria = btn?.getAttribute("aria-label");
+    const text = btn?.textContent;
+    return normalizeText(aria || text || "");
+  }
+
+  function modeFromModelSlug(model) {
+    if (typeof model !== "string") return null;
+    if (/\bpro\b/i.test(model)) return "pro";
+    if (/\bthinking\b/i.test(model)) return "thinking";
+    return null;
+  }
+
+  function detectMode() {
+    const byModelSlug = modeFromModelSlug(lastSeenModelSlug);
+    if (byModelSlug) return byModelSlug;
+
+    const modelText = getModelSelectorText();
+    if (/\b5\.?2\b/i.test(modelText)) {
+      if (/\bpro\b/i.test(modelText)) return "pro";
+      if (/\bthinking\b/i.test(modelText)) return "thinking";
     }
 
-    const likely = pills.filter((p) => /thinking|pro/i.test((p.textContent || "").trim()));
-    for (const p of likely) if (!ordered.includes(p)) ordered.push(p);
-    for (const p of pills) if (!ordered.includes(p)) ordered.push(p);
+    if (/\bpro\b/i.test(modelText)) return "pro";
+    if (/\bthinking\b/i.test(modelText)) return "thinking";
+    return null;
+  }
 
-    for (const pill of ordered) {
-      const opened = await openThinkingMenu(pill);
-      if (!opened) continue;
+  function isHighByEffort(mode, effort) {
+    if (mode === "thinking") return effort === "max";
+    if (mode === "pro") return effort === "extended";
+    return false;
+  }
 
-      /** @type {Element|null} */
-      let menu = null;
-      for (let i = 0; i < 8; i++) {
-        menu = findMenuForPill(pill);
-        if (menu) break;
-        await sleep(40);
-      }
+  function getForcedEffort(mode) {
+    if (mode === "thinking") return forcedThinkingEffort;
+    if (mode === "pro") return forcedProEffort;
+    return null;
+  }
 
-      if (menu && menuHasEffortOptions(menu)) return pill;
+  function setForcedEffort(mode, isHigh) {
+    if (mode === "thinking") forcedThinkingEffort = isHigh ? "max" : "min";
+    if (mode === "pro") forcedProEffort = isHigh ? "extended" : "standard";
+  }
 
-      // 不是推理强度菜单：关掉再继续试下一个
-      clickLikeUser(pill);
-      await sleep(60);
-    }
+  function getCurrentIsHigh(mode, pill) {
+    const forced = getForcedEffort(mode);
+    if (forced) return isHighByEffort(mode, forced);
 
-    return ordered[0] || null;
+    const text = normalizeText(pill?.textContent).toLowerCase();
+    if (mode === "thinking") return /\bheavy\b/.test(text);
+    if (mode === "pro") return /\bextended\b/.test(text);
+    return false;
+  }
+
+  function getTargetLabel(mode, isHigh) {
+    if (mode === "thinking") return isHigh ? "Heavy" : "Light";
+    if (mode === "pro") return isHigh ? "Extended" : "Standard";
+    return isHigh ? "High" : "Low";
   }
 
   async function toggleThinkingTime() {
@@ -260,52 +211,125 @@ button.${PULSE_CLASS} {
         return;
       }
 
-      const opened = await openThinkingMenu(pill);
-      if (!opened) {
-        warn("打开推理强度菜单失败");
+      const mode = detectMode();
+      if (!mode) {
+        warn("无法识别当前模式（5.2 Thinking / 5.2 Pro）");
         return;
       }
 
-      /** @type {Element|null} */
-      let menu = null;
-      for (let i = 0; i < 10; i++) {
-        menu = findMenuForPill(pill);
-        if (menu && menuHasEffortOptions(menu)) break;
-        await sleep(50);
-      }
-      if (!menu) {
-        warn("没找到推理强度菜单");
-        return;
-      }
+      const currentHigh = getCurrentIsHigh(mode, pill);
+      const nextHigh = !currentHigh;
+      setForcedEffort(mode, nextHigh);
 
-      const { light, standard, extended, heavy } = getEffortItems(menu);
-
-      if (light && heavy) {
-        const heavyChecked = heavy.getAttribute("aria-checked") === "true";
-        const target = heavyChecked ? light : heavy;
-        clickLikeUser(target);
-        info(`检测到thinking模式，切换到${heavyChecked ? "Light" : "Heavy"} thinking`);
-        schedulePulse(pill, !heavyChecked);
-        return;
-      }
-
-      if (!standard || !extended) {
-        warn("菜单里没看到 Standard/Extended");
-        return;
-      }
-
-      const extendedChecked = extended.getAttribute("aria-checked") === "true";
-      const target = extendedChecked ? standard : extended;
-      clickLikeUser(target);
-      info(`检测到pro模式，切换到${extendedChecked ? "Standard" : "Extended"} thinking`);
-      schedulePulse(pill, !extendedChecked);
+      info(`检测到${mode}模式，切换到${getTargetLabel(mode, nextHigh)} thinking`);
+      schedulePulse(pill, nextHigh);
     } catch (err) {
       log(err);
-      error("切换失败", err);
+      warn("切换失败（异常已吞掉，避免影响页面）");
     } finally {
       busy = false;
     }
   }
+
+  function isConversationRequestUrl(url) {
+    if (typeof url !== "string") return false;
+    return (
+      /\/backend-api\/f\/conversation(?:\?|$)/.test(url) ||
+      /\/backend-api\/conversation(?:\?|$)/.test(url)
+    );
+  }
+
+  function installFetchPatch() {
+    if (window[FETCH_PATCH_FLAG]) return;
+    window[FETCH_PATCH_FLAG] = true;
+
+    const originalFetch = window.fetch;
+    if (typeof originalFetch !== "function") return;
+
+    window.fetch = async function (input, init) {
+      try {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof Request
+              ? input.url
+              : typeof input?.url === "string"
+                ? input.url
+                : "";
+
+        if (!isConversationRequestUrl(url)) return originalFetch.apply(this, arguments);
+
+        // 优先处理最常见的：fetch(url, { body: JSON.stringify(...) })
+        if (init && typeof init.body === "string") {
+          let payload = null;
+          try {
+            payload = JSON.parse(init.body);
+          } catch (_) {
+            payload = null;
+          }
+
+          if (payload && typeof payload === "object") {
+            const model = typeof payload.model === "string" ? payload.model : null;
+            if (model) lastSeenModelSlug = model;
+            const mode = modeFromModelSlug(model);
+            const forced = mode ? getForcedEffort(mode) : null;
+
+            if (mode && forced) {
+              payload.thinking_effort = forced;
+              init = { ...init, body: JSON.stringify(payload) };
+            }
+          }
+
+          return originalFetch.call(this, input, init);
+        }
+
+        // 兜底：fetch(Request) / fetch(Request, init)
+        const request = new Request(input, init);
+        if (request.method.toUpperCase() !== "POST") return originalFetch.apply(this, arguments);
+
+        const text = await request.clone().text();
+        if (!text) return originalFetch.apply(this, arguments);
+
+        let payload = null;
+        try {
+          payload = JSON.parse(text);
+        } catch (_) {
+          payload = null;
+        }
+        if (!payload || typeof payload !== "object") return originalFetch.apply(this, arguments);
+
+        const model = typeof payload.model === "string" ? payload.model : null;
+        if (model) lastSeenModelSlug = model;
+        const mode = modeFromModelSlug(model);
+        const forced = mode ? getForcedEffort(mode) : null;
+        if (!mode || !forced) return originalFetch.apply(this, arguments);
+
+        payload.thinking_effort = forced;
+
+        const headers = new Headers(request.headers);
+        const patched = new Request(request.url, {
+          method: request.method,
+          headers,
+          body: JSON.stringify(payload),
+          credentials: request.credentials,
+          cache: request.cache,
+          redirect: request.redirect,
+          referrer: request.referrer,
+          referrerPolicy: request.referrerPolicy,
+          integrity: request.integrity,
+          keepalive: request.keepalive,
+          mode: request.mode,
+          signal: request.signal,
+        });
+        return originalFetch.call(this, patched);
+      } catch (err) {
+        log(err);
+        return originalFetch.apply(this, arguments);
+      }
+    };
+  }
+
+  installFetchPatch();
 
   window.addEventListener(
     "keydown",
