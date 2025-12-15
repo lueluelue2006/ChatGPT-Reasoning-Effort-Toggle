@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT 推理强度快捷切换（⌘O：Light ↔ Heavy / Standard ↔ Extended）
 // @namespace    https://github.com/lueluelue2006/ChatGPT-Reasoning-Effort-Toggle
-// @version      1.7
-// @description  在 chatgpt.com 使用 ⌘O 切换推理强度：5.2 Thinking(四档)在 Light↔Heavy 之间切；5.2 Pro(两档)在 Standard↔Extended 之间切；每次切换会在控制台输出检测模式与目标档位，并让选择器闪一下提示已切换（低档蓝，高档红）。本脚本会强制修改发送消息请求里的 thinking_effort，避免官网 UI 切换“看起来切了但实际没生效”，并在控制台提示是否已成功写入请求。
+// @version      1.3
+// @description  在 chatgpt.com 使用 ⌘O 切换推理强度：5.2 Thinking(四档)在 Light↔Heavy 之间切；5.2 Pro(两档)在 Standard↔Extended 之间切；每次切换会在控制台输出检测模式与目标档位，并让选择器闪一下提示已切换（低档蓝，高档红）；0.5s 内只响应一次快捷键；发送成功后右下角弹窗显示实际使用的 thinking_effort。
 // @author       schweigen
 // @license      MIT
 // @match        https://chatgpt.com/*
@@ -17,6 +17,10 @@
 
   const DEBUG = false;
   const LOG_PREFIX = "[TM][ThinkingToggle]";
+  const HOTKEY_COOLDOWN_MS = 500;
+  const FETCH_SNIFF_FLAG = "__tm_thinking_toggle_fetch_sniffed__";
+  const TOAST_STYLE_ID = "__tm_thinking_toggle_toast_style";
+  const TOAST_CONTAINER_ID = "__tm_thinking_toggle_toast_container";
   const PULSE_STYLE_ID = "__tm_thinking_toggle_pulse_style";
   const PULSE_CLASS = "__tm_thinking_toggle_pulse";
   const HINT_CLASS = "__tm_thinking_toggle_hint";
@@ -25,17 +29,8 @@
   const PULSE_RGB_LOW = "56,189,248"; // blue
   const PULSE_RGB_HIGH = "239,68,68"; // red
 
-  const FETCH_PATCH_FLAG = "__tm_thinking_toggle_fetch_patched__";
-
-  /** @type {boolean} */
   let busy = false;
-
-  /** @type {"min"|"max"|null} */
-  let forcedThinkingEffort = null;
-  /** @type {"standard"|"extended"|null} */
-  let forcedProEffort = null;
-  /** @type {string|null} */
-  let lastSeenModelSlug = null;
+  let lastHotkeyAt = 0;
 
   function log(...args) {
     if (!DEBUG) return;
@@ -43,31 +38,8 @@
     console.debug(LOG_PREFIX, ...args);
   }
 
-  function info(message) {
-    // eslint-disable-next-line no-console
-    console.log(LOG_PREFIX, message);
-  }
-
-  function warn(message) {
-    // eslint-disable-next-line no-console
-    console.warn(LOG_PREFIX, message);
-  }
-
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  function formatEffortValue(v) {
-    if (typeof v === "string" && v.trim()) return v.trim();
-    return "<none>";
-  }
-
-  function logPatchedRequest(mode, model, before, after) {
-    info(
-      `已强制写入请求：mode=${mode} model=${model || "<unknown>"} thinking_effort ${formatEffortValue(
-        before
-      )} -> ${formatEffortValue(after)}`
-    );
   }
 
   function ensurePulseStyle() {
@@ -114,6 +86,70 @@ button.${HINT_CLASS}::after {
     (document.head || document.documentElement).appendChild(style);
   }
 
+  function ensureToastStyle() {
+    if (document.getElementById(TOAST_STYLE_ID)) return;
+    const style = document.createElement("style");
+    style.id = TOAST_STYLE_ID;
+    style.textContent = `
+@keyframes __tmThinkingToggleToastInOut {
+  0% { opacity: 0; transform: translateY(8px); }
+  12% { opacity: 1; transform: translateY(0); }
+  86% { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(8px); }
+}
+#${TOAST_CONTAINER_ID} {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2147483647;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+  pointer-events: none;
+}
+#${TOAST_CONTAINER_ID} .__tmThinkingToggleToast {
+  pointer-events: none;
+  max-width: min(520px, 76vw);
+  padding: 8px 10px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.35;
+  color: rgba(255,255,255,.95);
+  background: rgba(0,0,0,.75);
+  border: 1px solid rgba(255,255,255,.14);
+  box-shadow: 0 10px 26px rgba(0,0,0,.25);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  animation: __tmThinkingToggleToastInOut 2200ms ease-in-out 0s 1;
+}
+`;
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  function ensureToastContainer() {
+    let container = document.getElementById(TOAST_CONTAINER_ID);
+    if (container) return container;
+    container = document.createElement("div");
+    container.id = TOAST_CONTAINER_ID;
+    (document.body || document.documentElement).appendChild(container);
+    return container;
+  }
+
+  function showToast(text) {
+    try {
+      ensureToastStyle();
+      const container = ensureToastContainer();
+      const toast = document.createElement("div");
+      toast.className = "__tmThinkingToggleToast";
+      toast.textContent = text;
+      container.appendChild(toast);
+      window.setTimeout(() => toast.remove(), 2400);
+    } catch (_) {
+      // ignore
+    }
+  }
+
   function pulseOnce(el, rgb) {
     if (!(el instanceof HTMLElement)) return;
     ensurePulseStyle();
@@ -158,6 +194,110 @@ button.${HINT_CLASS}::after {
     }, 80);
   }
 
+  function info(message) {
+    // eslint-disable-next-line no-console
+    console.log(LOG_PREFIX, message);
+  }
+
+  function warn(message) {
+    // eslint-disable-next-line no-console
+    console.warn(LOG_PREFIX, message);
+  }
+
+  function error(message, err) {
+    // eslint-disable-next-line no-console
+    if (typeof err === "undefined") console.error(LOG_PREFIX, message);
+    else console.error(LOG_PREFIX, message, err);
+  }
+
+  function isConversationSendUrl(url) {
+    if (typeof url !== "string") return false;
+    return /\/backend-api\/f\/conversation(?:\?|$)/.test(url);
+  }
+
+  function sniffEffortInfo(payload) {
+    if (!payload || typeof payload !== "object") return null;
+    const model = typeof payload.model === "string" ? payload.model : "";
+    const effort = typeof payload.thinking_effort === "string" ? payload.thinking_effort : "";
+    if (!effort) return null;
+
+    let mode = "unknown";
+    if (/\bpro\b/i.test(model)) mode = "pro";
+    else if (/\bthinking\b/i.test(model)) mode = "thinking";
+    else if (effort === "min" || effort === "max") mode = "thinking";
+    else if (effort === "standard" || effort === "extended") mode = "pro";
+
+    return { mode, model, effort };
+  }
+
+  function installFetchSniffer() {
+    if (window[FETCH_SNIFF_FLAG]) return;
+    window[FETCH_SNIFF_FLAG] = true;
+
+    const originalFetch = window.fetch;
+    if (typeof originalFetch !== "function") return;
+
+    window.fetch = async function (input, init) {
+      /** @type {{mode:string,model:string,effort:string}|null} */
+      let effortInfo = null;
+
+      try {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof Request
+              ? input.url
+              : typeof input?.url === "string"
+                ? input.url
+                : "";
+
+        const method =
+          (init && typeof init.method === "string" && init.method) ||
+          (input instanceof Request ? input.method : "GET");
+
+        if (isConversationSendUrl(url) && String(method).toUpperCase() === "POST") {
+          let bodyText = null;
+          if (init && typeof init.body === "string") {
+            bodyText = init.body;
+          } else if (input instanceof Request) {
+            try {
+              bodyText = await input.clone().text();
+            } catch (_) {
+              bodyText = null;
+            }
+          }
+
+          if (bodyText) {
+            let payload = null;
+            try {
+              payload = JSON.parse(bodyText);
+            } catch (_) {
+              payload = null;
+            }
+            effortInfo = sniffEffortInfo(payload);
+          }
+        }
+      } catch (e) {
+        log(e);
+      }
+
+      const response = await originalFetch.apply(this, arguments);
+
+      try {
+        if (effortInfo && response && response.ok) {
+          const suffix = effortInfo.model ? ` (${effortInfo.model})` : "";
+          if (effortInfo.mode === "thinking") showToast(`发送成功：thinking ${effortInfo.effort}${suffix}`);
+          else if (effortInfo.mode === "pro") showToast(`发送成功：pro ${effortInfo.effort}${suffix}`);
+          else showToast(`发送成功：thinking_effort=${effortInfo.effort}${suffix}`);
+        }
+      } catch (_) {
+        // ignore
+      }
+
+      return response;
+    };
+  }
+
   function isHotkey(event) {
     if (!event.metaKey) return false;
     if (event.ctrlKey || event.altKey || event.shiftKey) return false;
@@ -165,6 +305,43 @@ button.${HINT_CLASS}::after {
     const code = typeof event.code === "string" ? event.code : "";
     const key = typeof event.key === "string" ? event.key : "";
     return code === "KeyO" || key.toLowerCase() === "o";
+  }
+
+  function clickLikeUser(el) {
+    if (!(el instanceof Element)) return false;
+    try {
+      el.focus?.();
+    } catch (_) {
+      // ignore
+    }
+
+    const base = { bubbles: true, cancelable: true };
+
+    try {
+      el.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          ...base,
+          pointerId: 1,
+          pointerType: "mouse",
+          isPrimary: true,
+        })
+      );
+      el.dispatchEvent(
+        new PointerEvent("pointerup", {
+          ...base,
+          pointerId: 1,
+          pointerType: "mouse",
+          isPrimary: true,
+        })
+      );
+    } catch (_) {
+      // ignore
+    }
+
+    el.dispatchEvent(new MouseEvent("mousedown", base));
+    el.dispatchEvent(new MouseEvent("mouseup", base));
+    el.dispatchEvent(new MouseEvent("click", base));
+    return true;
   }
 
   function getComposerRoot() {
@@ -180,82 +357,111 @@ button.${HINT_CLASS}::after {
     ).filter((el) => el instanceof HTMLButtonElement);
   }
 
+  function getEffortItems(menu) {
+    const items = Array.from(menu.querySelectorAll("[role='menuitemradio']"));
+    /** @type {Element|null} */
+    let light = null;
+    /** @type {Element|null} */
+    let standard = null;
+    /** @type {Element|null} */
+    let extended = null;
+    /** @type {Element|null} */
+    let heavy = null;
+
+    for (const item of items) {
+      const t = (item.textContent || "").trim().toLowerCase();
+      if (!light && /\blight\b/.test(t)) light = item;
+      if (!standard && /\bstandard\b/.test(t)) standard = item;
+      if (!extended && /\bextended\b/.test(t)) extended = item;
+      if (!heavy && /\bheavy\b/.test(t)) heavy = item;
+    }
+
+    return { light, standard, extended, heavy };
+  }
+
+  function menuHasEffortOptions(menu) {
+    const { light, standard, extended, heavy } = getEffortItems(menu);
+    const hasTwo = !!standard && !!extended;
+    const hasFourExtremes = !!light && !!heavy;
+    return hasTwo || hasFourExtremes;
+  }
+
+  function findMenuForPill(pill) {
+    if (!(pill instanceof Element)) return null;
+    const labelId = typeof pill.id === "string" ? pill.id : "";
+    if (!labelId) return null;
+
+    const menus = Array.from(document.querySelectorAll("[role='menu']"));
+    for (const menu of menus) {
+      if (menu.getAttribute("aria-labelledby") === labelId) return menu;
+    }
+    return null;
+  }
+
   async function findEffortPill() {
     const pills = listComposerPills();
     if (!pills.length) return null;
     if (pills.length === 1) return pills[0];
 
-    const likely = pills.find((p) => /thinking|pro/i.test((p.textContent || "").trim()));
-    return likely || pills[0] || null;
+    /** @type {HTMLButtonElement[]} */
+    const ordered = [];
+
+    const active = document.activeElement;
+    if (active instanceof HTMLButtonElement && active.matches("button.__composer-pill")) {
+      ordered.push(active);
+    }
+
+    const likely = pills.filter((p) => /thinking|pro/i.test((p.textContent || "").trim()));
+    for (const p of likely) if (!ordered.includes(p)) ordered.push(p);
+    for (const p of pills) if (!ordered.includes(p)) ordered.push(p);
+
+    for (const pill of ordered) {
+      const opened = await openThinkingMenu(pill);
+      if (!opened) continue;
+
+      /** @type {Element|null} */
+      let menu = null;
+      for (let i = 0; i < 8; i++) {
+        menu = findMenuForPill(pill);
+        if (menu) break;
+        await sleep(40);
+      }
+
+      if (menu && menuHasEffortOptions(menu)) return pill;
+
+      // 不是推理强度菜单：关掉再继续试下一个
+      clickLikeUser(pill);
+      await sleep(60);
+    }
+
+    return ordered[0] || null;
   }
 
-  function normalizeText(s) {
-    return (s || "").toString().trim();
+  function getStandardExtendedItems(menu) {
+    const items = Array.from(menu.querySelectorAll("[role='menuitemradio']"));
+    /** @type {Element|null} */
+    let standard = null;
+    /** @type {Element|null} */
+    let extended = null;
+
+    for (const item of items) {
+      const t = (item.textContent || "").trim().toLowerCase();
+      if (!standard && t.includes("standard")) standard = item;
+      if (!extended && t.includes("extended")) extended = item;
+    }
+
+    return { standard, extended };
   }
 
-  function getModelSelectorText() {
-    const btn =
-      document.querySelector('button[aria-label*=\"current model is\"]') ||
-      document.querySelector('button[aria-label^=\"Model selector\"]');
-    const aria = btn?.getAttribute("aria-label");
-    const text = btn?.textContent;
-    return normalizeText(aria || text || "");
-  }
+  async function openThinkingMenu(pill) {
+    clickLikeUser(pill);
+    await sleep(60);
+    if (pill.getAttribute("aria-expanded") === "true") return true;
+    if (pill.getAttribute("data-state") === "open") return true;
 
-  function modeFromModelSlug(model) {
-    if (typeof model !== "string") return null;
-    if (/\bpro\b/i.test(model)) return "pro";
-    if (/\bthinking\b/i.test(model)) return "thinking";
-    return null;
-  }
-
-  function detectMode() {
-    const modelText = getModelSelectorText();
-    if (/\bpro\b/i.test(modelText)) return "pro";
-    if (/\bthinking\b/i.test(modelText)) return "thinking";
-
-    const byModelSlug = modeFromModelSlug(lastSeenModelSlug);
-    if (byModelSlug) return byModelSlug;
-    return null;
-  }
-
-  function isHighByEffort(mode, effort) {
-    if (mode === "thinking") return effort === "max";
-    if (mode === "pro") return effort === "extended";
-    return false;
-  }
-
-  function getForcedEffort(mode) {
-    if (mode === "thinking") return forcedThinkingEffort;
-    if (mode === "pro") return forcedProEffort;
-    return null;
-  }
-
-  function setForcedEffort(mode, isHigh) {
-    if (mode === "thinking") forcedThinkingEffort = isHigh ? "max" : "min";
-    if (mode === "pro") forcedProEffort = isHigh ? "extended" : "standard";
-  }
-
-  function getCurrentIsHigh(mode, pill) {
-    const forced = getForcedEffort(mode);
-    if (forced) return isHighByEffort(mode, forced);
-
-    const text = normalizeText(pill?.textContent).toLowerCase();
-    if (mode === "thinking") return /\bheavy\b/.test(text);
-    if (mode === "pro") return /\bextended\b/.test(text);
-    return false;
-  }
-
-  function getTargetLabel(mode, isHigh) {
-    if (mode === "thinking") return isHigh ? "Heavy" : "Light";
-    if (mode === "pro") return isHigh ? "Extended" : "Standard";
-    return isHigh ? "High" : "Low";
-  }
-
-  function getEffortValue(mode, isHigh) {
-    if (mode === "thinking") return isHigh ? "max" : "min";
-    if (mode === "pro") return isHigh ? "extended" : "standard";
-    return null;
+    clickLikeUser(pill);
+    await sleep(120);
+    return pill.getAttribute("aria-expanded") === "true" || pill.getAttribute("data-state") === "open";
   }
 
   async function toggleThinkingTime() {
@@ -269,143 +475,64 @@ button.${HINT_CLASS}::after {
         return;
       }
 
-      const mode = detectMode();
-      if (!mode) {
-        warn("无法识别当前模式（5.2 Thinking / 5.2 Pro）");
+      const opened = await openThinkingMenu(pill);
+      if (!opened) {
+        warn("打开推理强度菜单失败");
         return;
       }
 
-      const currentHigh = getCurrentIsHigh(mode, pill);
-      const nextHigh = !currentHigh;
-      setForcedEffort(mode, nextHigh);
+      /** @type {Element|null} */
+      let menu = null;
+      for (let i = 0; i < 10; i++) {
+        menu = findMenuForPill(pill);
+        if (menu && menuHasEffortOptions(menu)) break;
+        await sleep(50);
+      }
+      if (!menu) {
+        warn("没找到推理强度菜单");
+        return;
+      }
 
-      const label = getTargetLabel(mode, nextHigh);
-      const effortValue = getEffortValue(mode, nextHigh);
+      const { light, standard, extended, heavy } = getEffortItems(menu);
 
-      info(
-        `检测到${mode}模式，切换到${label} thinking${
-          effortValue ? ` (thinking_effort=${effortValue})` : ""
-        }`
-      );
+      if (light && heavy) {
+        const heavyChecked = heavy.getAttribute("aria-checked") === "true";
+        const target = heavyChecked ? light : heavy;
+        clickLikeUser(target);
+        const label = heavyChecked ? "Light" : "Heavy";
+        info(`检测到thinking模式，切换到${label} thinking`);
+        try {
+          pill.title = label;
+        } catch (_) {
+          // ignore
+        }
+        schedulePulse(pill, !heavyChecked, label);
+        return;
+      }
+
+      if (!standard || !extended) {
+        warn("菜单里没看到 Standard/Extended");
+        return;
+      }
+
+      const extendedChecked = extended.getAttribute("aria-checked") === "true";
+      const target = extendedChecked ? standard : extended;
+      clickLikeUser(target);
+      const label = extendedChecked ? "Standard" : "Extended";
+      info(`检测到pro模式，切换到${label} thinking`);
       try {
-        pill.title = effortValue ? `${label} (thinking_effort=${effortValue})` : label;
+        pill.title = label;
       } catch (_) {
         // ignore
       }
-      schedulePulse(pill, nextHigh, effortValue ? `${label} (${effortValue})` : label);
+      schedulePulse(pill, !extendedChecked, label);
     } catch (err) {
       log(err);
-      warn("切换失败（异常已吞掉，避免影响页面）");
+      error("切换失败", err);
     } finally {
       busy = false;
     }
   }
-
-  function isConversationRequestUrl(url) {
-    if (typeof url !== "string") return false;
-    return (
-      /\/backend-api\/f\/conversation(?:\?|$)/.test(url) ||
-      /\/backend-api\/conversation(?:\?|$)/.test(url)
-    );
-  }
-
-  function installFetchPatch() {
-    if (window[FETCH_PATCH_FLAG]) return;
-    window[FETCH_PATCH_FLAG] = true;
-
-    const originalFetch = window.fetch;
-    if (typeof originalFetch !== "function") return;
-
-    window.fetch = async function (input, init) {
-      try {
-        const url =
-          typeof input === "string"
-            ? input
-            : input instanceof Request
-              ? input.url
-              : typeof input?.url === "string"
-                ? input.url
-                : "";
-
-        if (!isConversationRequestUrl(url)) return originalFetch.apply(this, arguments);
-
-        // 优先处理最常见的：fetch(url, { body: JSON.stringify(...) })
-        if (init && typeof init.body === "string") {
-          let payload = null;
-          try {
-            payload = JSON.parse(init.body);
-          } catch (_) {
-            payload = null;
-          }
-
-          if (payload && typeof payload === "object") {
-            const model = typeof payload.model === "string" ? payload.model : null;
-            if (model) lastSeenModelSlug = model;
-            const mode = modeFromModelSlug(model);
-            const forced = mode ? getForcedEffort(mode) : null;
-
-            if (mode && forced) {
-              const before = payload.thinking_effort;
-              payload.thinking_effort = forced;
-              init = { ...init, body: JSON.stringify(payload) };
-              logPatchedRequest(mode, model, before, forced);
-            }
-          }
-
-          return originalFetch.call(this, input, init);
-        }
-
-        // 兜底：fetch(Request) / fetch(Request, init)
-        const request = new Request(input, init);
-        if (request.method.toUpperCase() !== "POST") return originalFetch.apply(this, arguments);
-
-        const text = await request.clone().text();
-        if (!text) return originalFetch.apply(this, arguments);
-
-        let payload = null;
-        try {
-          payload = JSON.parse(text);
-        } catch (_) {
-          payload = null;
-        }
-        if (!payload || typeof payload !== "object") return originalFetch.apply(this, arguments);
-
-        const model = typeof payload.model === "string" ? payload.model : null;
-        if (model) lastSeenModelSlug = model;
-        const mode = modeFromModelSlug(model);
-        const forced = mode ? getForcedEffort(mode) : null;
-        if (!mode || !forced) return originalFetch.apply(this, arguments);
-
-        const before = payload.thinking_effort;
-        payload.thinking_effort = forced;
-        logPatchedRequest(mode, model, before, forced);
-
-        const headers = new Headers(request.headers);
-        const patched = new Request(request.url, {
-          method: request.method,
-          headers,
-          body: JSON.stringify(payload),
-          credentials: request.credentials,
-          cache: request.cache,
-          redirect: request.redirect,
-          referrer: request.referrer,
-          referrerPolicy: request.referrerPolicy,
-          integrity: request.integrity,
-          keepalive: request.keepalive,
-          mode: request.mode,
-          signal: request.signal,
-        });
-        return originalFetch.call(this, patched);
-      } catch (err) {
-        log(err);
-        return originalFetch.apply(this, arguments);
-      }
-    };
-
-    info("fetch patch 已安装：会在发送时强制写入 thinking_effort（按 ⌘O 切换目标档位）");
-  }
-
-  installFetchPatch();
 
   window.addEventListener(
     "keydown",
@@ -417,8 +544,16 @@ button.${HINT_CLASS}::after {
       event.stopImmediatePropagation();
 
       if (event.repeat) return;
+      if (busy) return;
+
+      const now = Date.now();
+      if (now - lastHotkeyAt < HOTKEY_COOLDOWN_MS) return;
+      lastHotkeyAt = now;
+
       toggleThinkingTime();
     },
     true
   );
+
+  installFetchSniffer();
 })();
